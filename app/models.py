@@ -115,6 +115,7 @@ class PlannedTask(Base):
     status = Column(String(20), default="pending", index=True)      # pending/done/cancelled
     source_type = Column(String(20), default="")                    # memo/task/manual
     source_id = Column(Integer, nullable=True)                      # 来源 Memo ID
+    day_of_week = Column(Integer, default=1)                        # 1=周一 … 7=周日
     notes = Column(Text, default="")
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
@@ -131,6 +132,7 @@ class PlannedTask(Base):
             "status": self.status,
             "source_type": self.source_type,
             "source_id": self.source_id,
+            "day_of_week": self.day_of_week,
             "notes": self.notes,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

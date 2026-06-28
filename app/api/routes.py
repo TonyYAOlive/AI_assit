@@ -13,7 +13,7 @@ from app.schemas import TextInput, StatusUpdate, MemoCreate, MemoStatusUpdate, T
 from app.services.parser import parse_schedule
 from app.services.query import query_schedules
 from app.services.router import route as llm_route
-from app.services.planner import generate_weekly_tasks, generate_day_plan
+from app.services.planner import generate_weekly_tasks, generate_day_plan, format_weekly_plan
 from app.tools.memo_tool import memo_create
 
 router = APIRouter()
@@ -80,11 +80,8 @@ def _handle_command(text: str, db: Session, chat_id: int):
             return f"生成计划失败，请稍后重试。（{e}）"
         if not tasks:
             return "暂无备忘录或长期任务，无法生成计划。"
-        week_start = tasks[0]["week_start_date"][:10] if tasks else ""
-        lines = [f"下周（{week_start} 起）计划任务："]
-        for t in tasks:
-            lines.append(f"• {t['title']}  {t['duration_hrs']}h  [{t['priority']}]")
-        return "\n".join(lines)
+        week_start = datetime.fromisoformat(tasks[0]["week_start_date"][:10])
+        return format_weekly_plan(tasks, week_start)
 
     if text.startswith("/day_plan"):
         try:
@@ -187,10 +184,8 @@ def _handle_nlp(text: str, db: Session) -> str:
             return f"生成计划失败，请稍后重试。（{e}）"
         if not tasks:
             return "暂无备忘录或长期任务，无法生成计划。"
-        lines = [f"下周计划已生成，共 {len(tasks)} 项："]
-        for t in tasks:
-            lines.append(f"• {t['title']}  {t['duration_hrs']}h  [{t['priority']}]")
-        return "\n".join(lines)
+        week_start = datetime.fromisoformat(tasks[0]["week_start_date"][:10])
+        return format_weekly_plan(tasks, week_start)
 
     if intent == "generate_day_plan":
         try:
