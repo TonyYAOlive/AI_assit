@@ -4,6 +4,6 @@ from abc import ABC, abstractmethod
 
 class LLMClient(ABC):
     @abstractmethod
-    def chat_json(self, system_prompt: str, user_input: str) -> dict:
+    def chat_json(self, system_prompt: str, user_input: str, max_tokens: int = 1024) -> dict:
         """输入 system prompt 和用户输入，返回解析好的 JSON dict。"""
         pass

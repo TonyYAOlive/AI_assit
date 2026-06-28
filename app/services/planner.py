@@ -123,7 +123,7 @@ def generate_weekly_tasks(db: Session, now: datetime = None) -> list[dict]:
         tasks_text=tasks_text,
     )
 
-    items = llm_client.chat_json(system_prompt=system_prompt, user_input="请生成下周计划")
+    items = llm_client.chat_json(system_prompt=system_prompt, user_input="请生成下周计划", max_tokens=4096)
     if not isinstance(items, list):
         items = []
 
@@ -209,7 +209,7 @@ def generate_day_plan(db: Session, now: datetime = None) -> list[dict]:
         tasks_text=tasks_text,
     )
 
-    items = llm_client.chat_json(system_prompt=system_prompt, user_input="请生成今日计划")
+    items = llm_client.chat_json(system_prompt=system_prompt, user_input="请生成今日计划", max_tokens=4096)
     if not isinstance(items, list):
         items = []
 

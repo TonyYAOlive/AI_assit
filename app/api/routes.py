@@ -74,7 +74,10 @@ def _handle_command(text: str, db: Session, chat_id: int):
         return f"已添加长期任务：{result['content']}"
 
     if text.startswith("/plan"):
-        tasks = generate_weekly_tasks(db)
+        try:
+            tasks = generate_weekly_tasks(db)
+        except Exception as e:
+            return f"生成计划失败，请稍后重试。（{e}）"
         if not tasks:
             return "暂无备忘录或长期任务，无法生成计划。"
         week_start = tasks[0]["week_start_date"][:10] if tasks else ""
@@ -84,7 +87,10 @@ def _handle_command(text: str, db: Session, chat_id: int):
         return "\n".join(lines)
 
     if text.startswith("/day_plan"):
-        entries = generate_day_plan(db)
+        try:
+            entries = generate_day_plan(db)
+        except Exception as e:
+            return f"生成今日计划失败，请稍后重试。（{e}）"
         if not entries:
             return "今日暂无计划任务。"
         lines = ["今日计划："]
@@ -175,7 +181,10 @@ def _handle_nlp(text: str, db: Session) -> str:
         return f"已添加长期任务：{m['content']}"
 
     if intent == "generate_weekly_plan":
-        tasks = generate_weekly_tasks(db)
+        try:
+            tasks = generate_weekly_tasks(db)
+        except Exception as e:
+            return f"生成计划失败，请稍后重试。（{e}）"
         if not tasks:
             return "暂无备忘录或长期任务，无法生成计划。"
         lines = [f"下周计划已生成，共 {len(tasks)} 项："]
@@ -184,7 +193,10 @@ def _handle_nlp(text: str, db: Session) -> str:
         return "\n".join(lines)
 
     if intent == "generate_day_plan":
-        entries = generate_day_plan(db)
+        try:
+            entries = generate_day_plan(db)
+        except Exception as e:
+            return f"生成今日计划失败，请稍后重试。（{e}）"
         if not entries:
             return "今日暂无计划任务。"
         lines = [f"今日计划已生成，共 {len(entries)} 项："]

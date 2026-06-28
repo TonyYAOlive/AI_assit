@@ -12,10 +12,10 @@ class ClaudeClient(LLMClient):
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = model
 
-    def chat_json(self, system_prompt: str, user_input: str) -> dict:
+    def chat_json(self, system_prompt: str, user_input: str, max_tokens: int = 1024) -> dict:
         response = self.client.messages.create(
             model=self.model,
-            max_tokens=1024,
+            max_tokens=max_tokens,
             system=system_prompt,
             messages=[{"role": "user", "content": user_input}],
         )
