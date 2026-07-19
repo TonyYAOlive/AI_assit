@@ -1,19 +1,25 @@
 """HTTP 路由。"""
 import json
 import urllib.request
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.config import TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET, TIMEZONE
+from app.config import TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET
 from app.models import Schedule, Memo, PlannedTask, DayPlan, get_db
 from app.schemas import TextInput, StatusUpdate, MemoCreate, MemoStatusUpdate, TaskStatusUpdate, DayPlanStatusUpdate
 from app.services.parser import parse_schedule
 from app.services.query import query_schedules
 from app.services.router import route as llm_route
-from app.services.planner import generate_weekly_tasks, generate_day_plan, format_weekly_plan
+from app.services.planner import (
+    generate_weekly_tasks,
+    generate_day_plan,
+    format_weekly_plan,
+    get_or_generate_weekly_plan,
+    get_or_generate_day_plan,
+    format_day_plan,
+)
 from app.tools.memo_tool import memo_create
 
 router = APIRouter()
@@ -42,20 +48,38 @@ _START_HELP = (
     "命令列表：\n"
     "/memo <内容>   — 添加备忘录（可加截止时间）\n"
     "/task <内容>   — 添加长期任务\n"
-    "/plan         — 生成下周计划任务列表\n"
-    "/day_plan     — 生成今日具体时间计划\n"
     "/memos        — 查看待办备忘录\n"
     "/tasks        — 查看长期任务\n"
-    "/plans        — 查看本周计划任务\n"
-    "/today        — 查看今日计划\n\n"
+    "/week_plan    — 查看/生成周计划（周日20点后为下周）\n"
+    "/day_plan     — 查看/生成今日计划\n\n"
     "也可以直接说话，我会判断你的意图。"
 )
 
 
+def _reply_week_plan(db: Session) -> str:
+    """查询/生成周计划，返回格式化好的回复文本。"""
+    try:
+        tasks, week_start, generated = get_or_generate_weekly_plan(db)
+    except Exception as e:
+        return f"获取周计划失败，请稍后重试。（{e}）"
+    if not tasks:
+        return "暂无备忘录或长期任务，无法生成计划。"
+    return format_weekly_plan(tasks, week_start)
+
+
+def _reply_day_plan(db: Session) -> str:
+    """查询/生成今日计划，返回格式化好的回复文本。"""
+    try:
+        entries, generated = get_or_generate_day_plan(db)
+    except Exception as e:
+        return f"获取今日计划失败，请稍后重试。（{e}）"
+    if not entries:
+        return "今日暂无计划任务。"
+    return format_day_plan(entries)
+
+
 def _handle_command(text: str, db: Session, chat_id: int):
     """处理命令前缀消息，返回回复文本。"""
-    now = datetime.now(ZoneInfo(TIMEZONE))
-
     if text.startswith("/start"):
         return _START_HELP
 
@@ -73,29 +97,11 @@ def _handle_command(text: str, db: Session, chat_id: int):
         result = memo_create(db=db, content=content, memo_type="long_term", raw_input=text)
         return f"已添加长期任务：{result['content']}"
 
-    if text.startswith("/plan"):
-        try:
-            tasks = generate_weekly_tasks(db)
-        except Exception as e:
-            return f"生成计划失败，请稍后重试。（{e}）"
-        if not tasks:
-            return "暂无备忘录或长期任务，无法生成计划。"
-        week_start = datetime.fromisoformat(tasks[0]["week_start_date"][:10])
-        return format_weekly_plan(tasks, week_start)
+    if text.startswith("/week_plan"):
+        return _reply_week_plan(db)
 
     if text.startswith("/day_plan"):
-        try:
-            entries = generate_day_plan(db)
-        except Exception as e:
-            return f"生成今日计划失败，请稍后重试。（{e}）"
-        if not entries:
-            return "今日暂无计划任务。"
-        lines = ["今日计划："]
-        for e in entries:
-            start = e["start_time"][11:16] if e["start_time"] else ""
-            end = e["end_time"][11:16] if e["end_time"] else ""
-            lines.append(f"• {start}~{end}  {e['title']}")
-        return "\n".join(lines)
+        return _reply_day_plan(db)
 
     if text.startswith("/memos"):
         memos = db.query(Memo).filter(
@@ -122,33 +128,11 @@ def _handle_command(text: str, db: Session, chat_id: int):
             lines.append(f"• [{t.id}] {t.content}")
         return "\n".join(lines)
 
-    if text.startswith("/plans"):
-        today = datetime(now.year, now.month, now.day)
-        this_monday = today - timedelta(days=now.weekday())
-        tasks = db.query(PlannedTask).filter(
-            PlannedTask.week_start_date == this_monday,
-            PlannedTask.status == "pending",
-        ).all()
-        if not tasks:
-            return "本周暂无计划任务，发送 /plan 生成下周计划。"
-        lines = ["本周计划任务："]
-        for t in tasks:
-            lines.append(f"• {t.title}  {t.duration_hrs}h  [{t.priority}]")
-        return "\n".join(lines)
+    if text.startswith("/plan"):
+        return _reply_week_plan(db)
 
     if text.startswith("/today"):
-        today = datetime(now.year, now.month, now.day)
-        entries = db.query(DayPlan).filter(
-            DayPlan.plan_date == today,
-        ).order_by(DayPlan.start_time.asc()).all()
-        if not entries:
-            return "今日暂无计划，发送 /day_plan 生成今日计划。"
-        lines = ["今日计划："]
-        for e in entries:
-            start = e.start_time.strftime("%H:%M") if e.start_time else ""
-            end = e.end_time.strftime("%H:%M") if e.end_time else ""
-            lines.append(f"• {start}~{end}  {e.title}")
-        return "\n".join(lines)
+        return _reply_day_plan(db)
 
     return None  # 不是已知命令
 
@@ -177,29 +161,11 @@ def _handle_nlp(text: str, db: Session) -> str:
         m = memo_create(db=db, content=content, memo_type="long_term", raw_input=text)
         return f"已添加长期任务：{m['content']}"
 
-    if intent == "generate_weekly_plan":
-        try:
-            tasks = generate_weekly_tasks(db)
-        except Exception as e:
-            return f"生成计划失败，请稍后重试。（{e}）"
-        if not tasks:
-            return "暂无备忘录或长期任务，无法生成计划。"
-        week_start = datetime.fromisoformat(tasks[0]["week_start_date"][:10])
-        return format_weekly_plan(tasks, week_start)
+    if intent in ("generate_weekly_plan", "query_plan"):
+        return _reply_week_plan(db)
 
-    if intent == "generate_day_plan":
-        try:
-            entries = generate_day_plan(db)
-        except Exception as e:
-            return f"生成今日计划失败，请稍后重试。（{e}）"
-        if not entries:
-            return "今日暂无计划任务。"
-        lines = [f"今日计划已生成，共 {len(entries)} 项："]
-        for e in entries:
-            start = e["start_time"][11:16] if e["start_time"] else ""
-            end = e["end_time"][11:16] if e["end_time"] else ""
-            lines.append(f"• {start}~{end}  {e['title']}")
-        return "\n".join(lines)
+    if intent in ("generate_day_plan", "query_today"):
+        return _reply_day_plan(db)
 
     if intent == "query_memo":
         memos = db.query(Memo).filter(
@@ -223,20 +189,6 @@ def _handle_nlp(text: str, db: Session) -> str:
         lines = [f"长期任务（{len(tasks)}条）："]
         for t in tasks:
             lines.append(f"• {t.content}")
-        return "\n".join(lines)
-
-    if intent == "query_today":
-        now = datetime.now(ZoneInfo(TIMEZONE))
-        today = datetime(now.year, now.month, now.day)
-        entries = db.query(DayPlan).filter(
-            DayPlan.plan_date == today,
-        ).order_by(DayPlan.start_time.asc()).limit(10).all()
-        if not entries:
-            return "今日暂无计划，发送 /day_plan 生成今日计划。"
-        lines = ["今日计划："]
-        for e in entries:
-            start = e.start_time.strftime("%H:%M") if e.start_time else ""
-            lines.append(f"• {start}  {e.title}")
         return "\n".join(lines)
 
     if intent == "greet":
@@ -442,7 +394,7 @@ _VALID_TASK_STATUSES = {"pending", "done", "cancelled"}
 
 @router.post("/plans/generate")
 def api_generate_weekly_tasks(db: Session = Depends(get_db)):
-    """触发生成下周 PlannedTask 列表"""
+    """强制重新生成目标周计划（允许重复，Telegram 端请使用 /week_plan）"""
     try:
         tasks = generate_weekly_tasks(db)
     except Exception as e:
