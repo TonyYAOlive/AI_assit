@@ -175,6 +175,34 @@ class DayPlan(Base):
         }
 
 
+class LedgerEntry(Base):
+    """个人流水记账：仅做录入。"""
+    __tablename__ = "ledger_entries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    amount = Column(Float, nullable=False)
+    entry_type = Column(String(10), nullable=False, index=True)    # income / expense
+    category = Column(String(20), default="其他", index=True)
+    note = Column(Text, default="")
+    entry_date = Column(DateTime, nullable=False, index=True)      # 业务记账日期（当天零点）
+    raw_input = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.now, index=True)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "amount": self.amount,
+            "entry_type": self.entry_type,
+            "category": self.category,
+            "note": self.note,
+            "entry_date": self.entry_date.isoformat() if self.entry_date else None,
+            "raw_input": self.raw_input,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 def init_db():
     """首次启动时创建表"""
     Base.metadata.create_all(bind=engine)

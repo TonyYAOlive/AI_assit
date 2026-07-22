@@ -21,6 +21,14 @@ from app.services.planner import (
     format_day_plan,
 )
 from app.tools.memo_tool import memo_create
+from app.services.ledger import (
+    normalize_parsed_entry,
+    stage_pending_entry,
+    pop_pending_entry,
+    format_confirmation_prompt,
+    format_ledger_entry,
+)
+from app.tools.ledger_tool import ledger_entry_create
 
 router = APIRouter()
 
@@ -46,10 +54,10 @@ def _send_telegram_message(chat_id: int, text: str) -> dict:
 _START_HELP = (
     "欢迎使用日程助手！\n\n"
     "命令列表：\n"
-    "/memo <内容>   — 添加备忘录（可加截止时间）\n"
-    "/task <内容>   — 添加长期任务\n"
-    "/memos        — 查看待办备忘录\n"
-    "/tasks        — 查看长期任务\n"
+    "/memo <内容>  — 添加备忘录（可加截止时间）\n"
+    "/memo         — 查看待办备忘录\n"
+    "/task <内容>  — 添加长期任务\n"
+    "/task         — 查看长期任务\n"
     "/week_plan    — 查看/生成周计划（周日20点后为下周）\n"
     "/day_plan     — 查看/生成今日计划\n\n"
     "也可以直接说话，我会判断你的意图。"
@@ -78,22 +86,51 @@ def _reply_day_plan(db: Session) -> str:
     return format_day_plan(entries)
 
 
+def _reply_query_memos(db: Session) -> str:
+    """查询待办备忘录，返回格式化文本（原 /memos 分支逻辑原样迁移）。"""
+    memos = db.query(Memo).filter(
+        Memo.memo_type == "temporary",
+        Memo.status == "pending",
+    ).order_by(Memo.created_at.desc()).all()
+    if not memos:
+        return "没有待办备忘录。"
+    lines = [f"待办备忘录（共{len(memos)}条）："]
+    for m in memos[:15]:
+        due = f" | 截止 {m.due_time.strftime('%m-%d')}" if m.due_time else ""
+        lines.append(f"• [{m.id}] {m.content}{due}")
+    return "\n".join(lines)
+
+
+def _reply_query_tasks(db: Session) -> str:
+    """查询长期任务，返回格式化文本（原 /tasks 分支逻辑原样迁移）。"""
+    tasks = db.query(Memo).filter(
+        Memo.memo_type == "long_term",
+        Memo.status == "pending",
+    ).order_by(Memo.created_at.desc()).all()
+    if not tasks:
+        return "没有长期任务。"
+    lines = [f"长期任务（共{len(tasks)}条）："]
+    for t in tasks[:15]:
+        lines.append(f"• [{t.id}] {t.content}")
+    return "\n".join(lines)
+
+
 def _handle_command(text: str, db: Session, chat_id: int):
     """处理命令前缀消息，返回回复文本。"""
     if text.startswith("/start"):
         return _START_HELP
 
-    if text.startswith("/memo"):
+    if text == "/memo" or text.startswith("/memo "):
         content = text[len("/memo"):].strip()
         if not content:
-            return "请在 /memo 后面写备忘内容，例如：/memo 周五前交报告"
+            return _reply_query_memos(db)
         result = memo_create(db=db, content=content, memo_type="temporary", raw_input=text)
         return f"已添加备忘录：{result['content']}"
 
-    if text.startswith("/task"):
+    if text == "/task" or text.startswith("/task "):
         content = text[len("/task"):].strip()
         if not content:
-            return "请在 /task 后面写任务内容，例如：/task 每周英语学习5小时"
+            return _reply_query_tasks(db)
         result = memo_create(db=db, content=content, memo_type="long_term", raw_input=text)
         return f"已添加长期任务：{result['content']}"
 
@@ -102,31 +139,6 @@ def _handle_command(text: str, db: Session, chat_id: int):
 
     if text.startswith("/day_plan"):
         return _reply_day_plan(db)
-
-    if text.startswith("/memos"):
-        memos = db.query(Memo).filter(
-            Memo.memo_type == "temporary",
-            Memo.status == "pending",
-        ).order_by(Memo.created_at.desc()).all()
-        if not memos:
-            return "没有待办备忘录。"
-        lines = [f"待办备忘录（共{len(memos)}条）："]
-        for m in memos[:15]:
-            due = f" | 截止 {m.due_time.strftime('%m-%d')}" if m.due_time else ""
-            lines.append(f"• [{m.id}] {m.content}{due}")
-        return "\n".join(lines)
-
-    if text.startswith("/tasks"):
-        tasks = db.query(Memo).filter(
-            Memo.memo_type == "long_term",
-            Memo.status == "pending",
-        ).order_by(Memo.created_at.desc()).all()
-        if not tasks:
-            return "没有长期任务。"
-        lines = [f"长期任务（共{len(tasks)}条）："]
-        for t in tasks[:15]:
-            lines.append(f"• [{t.id}] {t.content}")
-        return "\n".join(lines)
 
     if text.startswith("/plan"):
         return _reply_week_plan(db)
@@ -137,12 +149,37 @@ def _handle_command(text: str, db: Session, chat_id: int):
     return None  # 不是已知命令
 
 
-def _handle_nlp(text: str, db: Session) -> str:
+_LEDGER_YES = {"是", "对", "确认", "对的", "没错", "yes", "y", "ok", "好的", "好"}
+_LEDGER_NO = {"否", "不对", "不是", "取消", "no", "n", "错了", "不"}
+
+
+def _handle_nlp(text: str, db: Session, chat_id: int) -> str:
     """纯自然语言：调用 LLM 路由器分发。"""
+    reply_prefix = ""
+    pending, expired = pop_pending_entry(chat_id)
+    if expired:
+        reply_prefix = "（上一条待确认的记账请求已超时失效，如需记账请重新描述）\n"
+    elif pending is not None:
+        normalized = text.strip()
+        if normalized in _LEDGER_YES:
+            result = ledger_entry_create(
+                db=db,
+                amount=pending.amount,
+                entry_type=pending.entry_type,
+                category=pending.category,
+                note=pending.note,
+                entry_date=pending.entry_date,
+                raw_input=pending.raw_input,
+            )
+            return f"已记录：{format_ledger_entry(result)}"
+        if normalized in _LEDGER_NO:
+            return "好的，已取消这笔记录。"
+        reply_prefix = "（已放弃上一条未确认的流水）\n"
+
     try:
         result = llm_route(text)
     except Exception as e:
-        return f"解析失败，请换种说法试试。（{e}）"
+        return reply_prefix + f"解析失败，请换种说法试试。（{e}）"
 
     intent = result.get("intent", "unknown")
     data = result.get("data", {})
@@ -154,18 +191,25 @@ def _handle_nlp(text: str, db: Session) -> str:
         due_time = datetime.fromisoformat(due_time_str) if due_time_str else None
         m = memo_create(db=db, content=content, memo_type="temporary",
                         priority=priority, due_time=due_time, raw_input=text)
-        return f"已添加备忘录：{m['content']}"
+        return reply_prefix + f"已添加备忘录：{m['content']}"
 
     if intent == "add_long_term_task":
         content = data.get("content", text)
         m = memo_create(db=db, content=content, memo_type="long_term", raw_input=text)
-        return f"已添加长期任务：{m['content']}"
+        return reply_prefix + f"已添加长期任务：{m['content']}"
+
+    if intent == "add_ledger_entry":
+        fields = normalize_parsed_entry(data)
+        if fields is None:
+            return reply_prefix + "没有识别到有效金额，请重新描述这笔收支，例如：午饭花了30"
+        stage_pending_entry(chat_id, fields, raw_input=text)
+        return reply_prefix + format_confirmation_prompt(fields)
 
     if intent in ("generate_weekly_plan", "query_plan"):
-        return _reply_week_plan(db)
+        return reply_prefix + _reply_week_plan(db)
 
     if intent in ("generate_day_plan", "query_today"):
-        return _reply_day_plan(db)
+        return reply_prefix + _reply_day_plan(db)
 
     if intent == "query_memo":
         memos = db.query(Memo).filter(
@@ -173,11 +217,11 @@ def _handle_nlp(text: str, db: Session) -> str:
             Memo.status == "pending",
         ).order_by(Memo.created_at.desc()).limit(10).all()
         if not memos:
-            return "没有待办备忘录。"
+            return reply_prefix + "没有待办备忘录。"
         lines = [f"待办备忘录（{len(memos)}条）："]
         for m in memos:
             lines.append(f"• {m.content}")
-        return "\n".join(lines)
+        return reply_prefix + "\n".join(lines)
 
     if intent == "query_task":
         tasks = db.query(Memo).filter(
@@ -185,16 +229,16 @@ def _handle_nlp(text: str, db: Session) -> str:
             Memo.status == "pending",
         ).order_by(Memo.created_at.desc()).limit(10).all()
         if not tasks:
-            return "没有长期任务。"
+            return reply_prefix + "没有长期任务。"
         lines = [f"长期任务（{len(tasks)}条）："]
         for t in tasks:
             lines.append(f"• {t.content}")
-        return "\n".join(lines)
+        return reply_prefix + "\n".join(lines)
 
     if intent == "greet":
-        return "你好！有什么可以帮你？发送 /start 查看所有命令。"
+        return reply_prefix + "你好！有什么可以帮你？发送 /start 查看所有命令。"
 
-    return "没太明白你的意思，发送 /start 查看支持的命令。"
+    return reply_prefix + "没太明白你的意思，发送 /start 查看支持的命令。"
 
 
 @router.post("/telegram/webhook/{token}")
@@ -220,7 +264,7 @@ def telegram_webhook(token: str, update: dict, db: Session = Depends(get_db)):
         if reply is None:
             reply = "未知命令，发送 /start 查看所有命令。"
     else:
-        reply = _handle_nlp(text, db)
+        reply = _handle_nlp(text, db, chat_id)
 
     _send_telegram_message(chat_id, reply)
     return {"ok": True}

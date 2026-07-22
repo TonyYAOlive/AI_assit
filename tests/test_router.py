@@ -87,3 +87,20 @@ class TestRouterIntents:
         with patch.object(router_module.llm_client, "chat_json", return_value=mock_result):
             result = route("我有哪些长期任务")
         assert result["intent"] == "query_task"
+
+    def test_add_ledger_entry_intent(self):
+        mock_result = _mock_route("add_ledger_entry", {
+            "amount": 30,
+            "entry_type": "expense",
+            "category": "餐饮",
+            "note": "午饭",
+            "entry_date": "2026-07-20",
+        })
+        with patch.object(router_module.llm_client, "chat_json", return_value=mock_result):
+            result = route("午饭花了30")
+        assert result["intent"] == "add_ledger_entry"
+        assert result["data"]["amount"] == 30
+        assert result["data"]["entry_type"] == "expense"
+        assert result["data"]["category"] == "餐饮"
+        assert result["data"]["note"] == "午饭"
+        assert result["data"]["entry_date"] == "2026-07-20"

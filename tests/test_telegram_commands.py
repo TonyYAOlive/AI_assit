@@ -13,7 +13,7 @@ from sqlalchemy.orm import sessionmaker
 import app.services.planner as planner_module
 from app.api.routes import _handle_command, _handle_nlp
 from app.config import TIMEZONE
-from app.models import PlannedTask, DayPlan
+from app.models import PlannedTask, DayPlan, Memo
 from tests.conftest import engine
 
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -171,6 +171,75 @@ class TestUnknownCommand:
         assert reply is None
 
 
+# ── /task 精确匹配：带内容添加 / 无内容查询 ─────────────────────────────────────
+
+class TestTaskCommand:
+    def test_task_with_content_creates_long_term_memo(self, db):
+        reply = _handle_command("/task 学习强化英语", db, CHAT_ID)
+        assert "已添加长期任务" in reply
+        memos = db.query(Memo).filter(Memo.memo_type == "long_term").all()
+        assert len(memos) == 1
+        assert memos[0].content == "学习强化英语"
+
+    def test_task_without_content_queries_and_reports_empty(self, db):
+        reply = _handle_command("/task", db, CHAT_ID)
+        assert reply == "没有长期任务。"
+
+    def test_task_without_content_queries_and_lists_existing(self, db):
+        db.add(Memo(content="长期任务A", memo_type="long_term", status="pending"))
+        db.commit()
+        reply = _handle_command("/task", db, CHAT_ID)
+        assert "长期任务A" in reply
+        assert "长期任务（共1条）" in reply
+
+    def test_task_with_only_whitespace_is_treated_as_no_content(self, db):
+        reply = _handle_command("/task   ", db, CHAT_ID)
+        assert reply == "没有长期任务。"
+
+    def test_tasks_command_is_unknown(self, db):
+        reply = _handle_command("/tasks", db, CHAT_ID)
+        assert reply is None
+
+
+# ── /memo 精确匹配：带内容添加 / 无内容查询 ─────────────────────────────────────
+
+class TestMemoCommand:
+    def test_memo_with_content_creates_temporary_memo(self, db):
+        reply = _handle_command("/memo 买牛奶", db, CHAT_ID)
+        assert "已添加备忘录" in reply
+        memos = db.query(Memo).filter(Memo.memo_type == "temporary").all()
+        assert len(memos) == 1
+        assert memos[0].content == "买牛奶"
+
+    def test_memo_without_content_queries_and_reports_empty(self, db):
+        reply = _handle_command("/memo", db, CHAT_ID)
+        assert reply == "没有待办备忘录。"
+
+    def test_memo_without_content_queries_and_lists_existing(self, db):
+        db.add(Memo(content="备忘录A", memo_type="temporary", status="pending"))
+        db.commit()
+        reply = _handle_command("/memo", db, CHAT_ID)
+        assert "备忘录A" in reply
+        assert "待办备忘录（共1条）" in reply
+
+    def test_memo_with_only_whitespace_is_treated_as_no_content(self, db):
+        reply = _handle_command("/memo   ", db, CHAT_ID)
+        assert reply == "没有待办备忘录。"
+
+    def test_memos_command_is_unknown(self, db):
+        reply = _handle_command("/memos", db, CHAT_ID)
+        assert reply is None
+
+
+# ── /start 帮助文案 ────────────────────────────────────────────────────────────
+
+class TestStartCommand:
+    def test_start_help_text_does_not_mention_removed_commands(self, db):
+        reply = _handle_command("/start", db, CHAT_ID)
+        assert "/memos" not in reply
+        assert "/tasks" not in reply
+
+
 # ── _handle_nlp 意图路由 ───────────────────────────────────────────────────────
 
 class TestHandleNlpPlanIntents:
@@ -181,7 +250,7 @@ class TestHandleNlpPlanIntents:
         _add_planned_task(db, "查询周计划任务")
         with patch("app.api.routes.llm_route", return_value={"intent": "query_plan", "data": {}}):
             with patch.object(planner_module.llm_client, "chat_json") as mock_chat:
-                reply = _handle_nlp("我这周有什么计划", db)
+                reply = _handle_nlp("我这周有什么计划", db, CHAT_ID)
         mock_chat.assert_not_called()
         assert "查询周计划任务" in reply
         assert "没太明白" not in reply
@@ -190,7 +259,7 @@ class TestHandleNlpPlanIntents:
         _add_planned_task(db, "生成周计划任务")
         with patch("app.api.routes.llm_route", return_value={"intent": "generate_weekly_plan", "data": {}}):
             with patch.object(planner_module.llm_client, "chat_json") as mock_chat:
-                reply = _handle_nlp("帮我生成这周计划", db)
+                reply = _handle_nlp("帮我生成这周计划", db, CHAT_ID)
         mock_chat.assert_not_called()
         assert "生成周计划任务" in reply
 
@@ -198,7 +267,7 @@ class TestHandleNlpPlanIntents:
         _add_day_plan(db, "查询今日计划任务")
         with patch("app.api.routes.llm_route", return_value={"intent": "query_today", "data": {}}):
             with patch.object(planner_module.llm_client, "chat_json") as mock_chat:
-                reply = _handle_nlp("我今天有什么安排", db)
+                reply = _handle_nlp("我今天有什么安排", db, CHAT_ID)
         mock_chat.assert_not_called()
         assert "查询今日计划任务" in reply
 
@@ -206,11 +275,11 @@ class TestHandleNlpPlanIntents:
         _add_day_plan(db, "生成今日计划任务")
         with patch("app.api.routes.llm_route", return_value={"intent": "generate_day_plan", "data": {}}):
             with patch.object(planner_module.llm_client, "chat_json") as mock_chat:
-                reply = _handle_nlp("生成今天的计划", db)
+                reply = _handle_nlp("生成今天的计划", db, CHAT_ID)
         mock_chat.assert_not_called()
         assert "生成今日计划任务" in reply
 
     def test_unknown_intent_falls_back_to_default_message(self, db):
         with patch("app.api.routes.llm_route", return_value={"intent": "unknown", "data": {}}):
-            reply = _handle_nlp("asdkfjaslkdfj", db)
+            reply = _handle_nlp("asdkfjaslkdfj", db, CHAT_ID)
         assert "没太明白" in reply
